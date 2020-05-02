@@ -161,9 +161,9 @@ pub fn sync_run() {
         sync_datastores(&**ds_from, &*ds_local);
     }
 
-    log_buckets(&ds_local);
+    log_buckets(&*ds_local);
     for ds_from in &ds_remotes {
-        log_buckets(ds_from);
+        log_buckets(&**ds_from);
     }
 }
 
@@ -324,7 +324,7 @@ pub fn sync_datastores(ds_from: &dyn AccessMethod, ds_to: &dyn AccessMethod) {
     }
 }
 
-fn log_buckets(ds: &Box<dyn AccessMethod>) {
+fn log_buckets(ds: &dyn AccessMethod) {
     // Logs all buckets and some metadata for a given datastore
     let buckets = ds.get_buckets().unwrap();
     info!("Buckets in {:?}:", ds);

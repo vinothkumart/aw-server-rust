@@ -1,3 +1,6 @@
+// This is needed because clippy mistakenly reports unused_braces for the parser macro
+#![allow(unused_braces)]
+
 use crate::ast::*;
 use crate::lexer::Token::*;
 use crate::lexer::*;
