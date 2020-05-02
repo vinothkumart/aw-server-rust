@@ -8,6 +8,7 @@ extern crate serde_json;
 use std::collections::HashMap;
 use std::vec::Vec;
 
+use chrono::{DateTime, Utc};
 use serde_json::Map;
 
 pub use aw_models::{Bucket, BucketMetadata, Event};
@@ -74,16 +75,42 @@ impl AwClient {
         Ok(())
     }
 
-    pub fn get_events(&self, bucketname: &str) -> Result<Vec<Event>, reqwest::Error> {
+    pub fn get_events(
+        &self,
+        bucketname: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
-        Ok(self.client.get(&url).send()?.json()?)
+
+        let mut req = self.client.get(&url);
+        if let Some(start) = start {
+            req = req.query(&[("start", start.to_rfc3339())])
+        }
+        if let Some(end) = end {
+            req = req.query(&[("end", end.to_rfc3339())]);
+        }
+        if let Some(limit) = limit {
+            req = req.query(&[("limit", limit)]);
+        }
+
+        Ok(req.send()?.json()?)
     }
 
     pub fn insert_event(&self, bucketname: &str, event: &Event) -> Result<(), reqwest::Error> {
-        let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
         let mut eventlist = Vec::new();
         eventlist.push(event.clone());
-        self.client.post(&url).json(&eventlist).send()?;
+        self.insert_events(bucketname, eventlist)
+    }
+
+    pub fn insert_events(
+        &self,
+        bucketname: &str,
+        events: Vec<Event>,
+    ) -> Result<(), reqwest::Error> {
+        let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
+        self.client.post(&url).json(&events).send()?;
         Ok(())
     }
 
@@ -110,9 +137,23 @@ impl AwClient {
         Ok(())
     }
 
-    pub fn get_event_count(&self, bucketname: &str) -> Result<i64, reqwest::Error> {
+    pub fn get_event_count(
+        &self,
+        bucketname: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> Result<i64, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events/count", self.baseurl, bucketname);
-        let res = self.client.get(&url).send()?.text()?;
+        let mut req = self.client.get(&url);
+
+        if let Some(start) = start {
+            req = req.query(&[("start", start.to_rfc3339())])
+        }
+        if let Some(end) = end {
+            req = req.query(&[("end", end.to_rfc3339())]);
+        }
+
+        let res = req.send()?.text()?;
         let count: i64 = match res.parse() {
             Ok(count) => count,
             Err(err) => panic!("could not parse get_event_count response: {:?}", err),

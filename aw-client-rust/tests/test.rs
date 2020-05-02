@@ -78,29 +78,24 @@ mod test {
 
         let buckets = client.get_buckets().unwrap();
         println!("Buckets: {:?}", buckets);
+
+        let start = Utc::now();
+        let end = start + Duration::seconds(1);
         let mut event = Event {
             id: None,
-            timestamp: DateTime::from_utc(
-                DateTime::parse_from_rfc3339("2017-12-30T01:00:00+00:00")
-                    .unwrap()
-                    .naive_utc(),
-                Utc,
-            ),
+            timestamp: start,
             duration: Duration::seconds(0),
             data: Map::new(),
         };
         println!("{:?}", event);
         client.insert_event(&bucketname, &event).unwrap();
-        // Ugly way to create a UTC from timestamp, see https://github.com/chronotope/chrono/issues/263
-        event.timestamp = DateTime::from_utc(
-            DateTime::parse_from_rfc3339("2017-12-30T01:00:01+00:00")
-                .unwrap()
-                .naive_utc(),
-            Utc,
-        );
+
+        event.timestamp = end;
         client.heartbeat(&bucketname, &event, 10.0).unwrap();
 
-        let events = client.get_events(&bucketname).unwrap();
+        let events = client
+            .get_events(&bucketname, Some(start), Some(end), None)
+            .unwrap();
         println!("Events: {:?}", events);
         assert!(events[0].duration == Duration::seconds(1));
 
@@ -108,7 +103,9 @@ mod test {
             .delete_event(&bucketname, events[0].id.unwrap())
             .unwrap();
 
-        let count = client.get_event_count(&bucketname).unwrap();
+        let count = client
+            .get_event_count(&bucketname, Some(start), Some(end))
+            .unwrap();
         assert_eq!(count, 0);
 
         client.delete_bucket(&bucketname).unwrap();

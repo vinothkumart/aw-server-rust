@@ -30,9 +30,14 @@ pub trait AccessMethod: std::fmt::Debug {
         end: Option<DateTime<Utc>>,
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String>;
-    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<Vec<Event>, String>;
-    fn get_event_count(&self, bucket_id: &str) -> Result<i64, String>;
-    fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<Event, String>;
+    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String>;
+    fn get_event_count(
+        &self,
+        bucket_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> Result<i64, String>;
+    fn heartbeat(&self, bucket_id: &str, event: Event, pulsetime: f64) -> Result<Event, String>;
 }
 
 impl AccessMethod for Datastore {
@@ -43,9 +48,9 @@ impl AccessMethod for Datastore {
         self.get_bucket(bucket_id)
     }
     fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        let res = self.create_bucket(bucket)?;
+        self.create_bucket(bucket)?;
         self.force_commit().unwrap();
-        Ok(res)
+        Ok(())
     }
     fn get_events(
         &self,
@@ -56,18 +61,23 @@ impl AccessMethod for Datastore {
     ) -> Result<Vec<Event>, String> {
         Ok(self.get_events(bucket_id, start, end, limit).unwrap())
     }
-    fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<Event, String> {
-        let res = self.heartbeat(bucket_id, event, duration).unwrap();
+    fn heartbeat(&self, bucket_id: &str, event: Event, pulsetime: f64) -> Result<Event, String> {
+        let res = self.heartbeat(bucket_id, event, pulsetime).unwrap();
         self.force_commit().unwrap();
         Ok(res)
     }
-    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<Vec<Event>, String> {
-        let res = self.insert_events(bucket_id, &events[..]).unwrap();
+    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String> {
+        self.insert_events(bucket_id, &events[..]).unwrap();
         self.force_commit().unwrap();
-        Ok(res)
+        Ok(())
     }
-    fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
-        Ok(self.get_event_count(bucket_id, None, None).unwrap())
+    fn get_event_count(
+        &self,
+        bucket_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> Result<i64, String> {
+        Ok(self.get_event_count(bucket_id, start, end).unwrap())
     }
 }
 
@@ -85,34 +95,43 @@ impl AccessMethod for AwClient {
         end: Option<DateTime<Utc>>,
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String> {
-        Ok(self.get_events(bucket_id).unwrap())
+        Ok(self.get_events(bucket_id, start, end, limit).unwrap())
     }
-    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<Vec<Event>, String> {
-        //Ok(self.insert_events(bucket_id, &events[..]).unwrap())
-        Err("Not implemented".to_string())
+    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String> {
+        self.insert_events(bucket_id, events).unwrap();
+        Ok(())
     }
-    fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
-        //Ok(self.get_event_count(bucket_id, None, None).unwrap())
-        Err("Not implemented".to_string())
+    fn get_event_count(
+        &self,
+        bucket_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> Result<i64, String> {
+        Ok(self.get_event_count(bucket_id, start, end).unwrap())
     }
     fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        Ok(self
-            .create_bucket(bucket.id.as_str(), bucket._type.as_str())
-            .unwrap())
+        self.create_bucket(bucket.id.as_str(), bucket._type.as_str())
+            .unwrap();
+        Ok(())
         //Err(DatastoreError::InternalError("Not implemented".to_string()))
     }
-    fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<Event, String> {
-        Err("Not implemented".to_string())
+    fn heartbeat(&self, bucket_id: &str, event: Event, pulsetime: f64) -> Result<Event, String> {
+        self.heartbeat(bucket_id, &event, pulsetime).unwrap();
+        Ok(event)
+        //Err("Not implemented".to_string())
     }
 }
 
 /// Performs a single sync pass
 pub fn sync_run() {
+    // TODO: Rewrite to use AccessMethod throughout
+
     // TODO: Get path using dirs module
     let sync_directory = Path::new("/tmp/aw-sync-rust/testing");
     fs::create_dir_all(sync_directory).unwrap();
 
     // TODO: Use the local datastore here, preferably passed from main
+    info!("Setting up local datastore...");
     let ds_local = Datastore::new(
         sync_directory
             .join("test-local.db")
@@ -121,11 +140,10 @@ pub fn sync_run() {
             .unwrap(),
         false,
     );
-    info!("Set up local datastore");
     //log_buckets(&ds_local)?;
 
+    info!("Setting up remote datastores...");
     let ds_remotes = setup_test(sync_directory).unwrap();
-    info!("Set up remote datastores");
 
     // FIXME: These are not the datastores that should actually be synced, I'm just testing
     for ds_from in &ds_remotes {
@@ -154,11 +172,11 @@ fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
         // Create a bucket
         let bucket_jsonstr = format!(
             r#"{{
-            "id": "bucket-{}",
-            "type": "test",
-            "hostname": "device-{}",
-            "client": "test"
-        }}"#,
+                "id": "bucket-{}",
+                "type": "test",
+                "hostname": "device-{}",
+                "client": "test"
+            }}"#,
             n, n
         );
         let bucket: Bucket = serde_json::from_str(&bucket_jsonstr)?;
@@ -178,15 +196,14 @@ fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
                 let timestamp: DateTime<Utc> = Utc::now() + Duration::milliseconds(i * 10);
                 let event_jsonstr = format!(
                     r#"{{
-                "timestamp": "{}",
-                "duration": 0,
-                "data": {{"test": {} }}
-            }}"#,
+                        "timestamp": "{}",
+                        "duration": 0,
+                        "data": {{"test": {} }}
+                    }}"#,
                     timestamp.to_rfc3339(),
                     i
                 );
-                let event = serde_json::from_str(&event_jsonstr).unwrap();
-                event
+                serde_json::from_str(&event_jsonstr).unwrap()
             })
             .collect::<Vec<Event>>();
 
@@ -201,6 +218,7 @@ fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
 /// Returns the sync-destination bucket for a given bucket, creates it if it doesn't exist.
 fn get_or_create_sync_bucket(bucket_from: &Bucket, ds_to: &dyn AccessMethod) -> Bucket {
     // Ensure the bucket ID ends in "-synced"
+    // TODO: Include device ID in synced bucket ID (to make unique)
     let new_id = format!("{}-synced", bucket_from.id.replace("-synced", ""));
 
     match ds_to.get_bucket(new_id.as_str()) {
@@ -229,7 +247,9 @@ pub fn sync_datastores(ds_from: &dyn AccessMethod, ds_to: &dyn AccessMethod) {
     let buckets_from = ds_from.get_buckets().unwrap();
     for bucket_from in buckets_from.values() {
         let bucket_to = get_or_create_sync_bucket(bucket_from, ds_to);
-        let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
+        let eventcount_to_old = ds_to
+            .get_event_count(bucket_to.id.as_str(), None, None)
+            .unwrap();
         //info!("{:?}", bucket_to);
 
         // Sync events
@@ -264,7 +284,9 @@ pub fn sync_datastores(ds_from: &dyn AccessMethod, ds_to: &dyn AccessMethod) {
             ds_to.heartbeat(bucket_to.id.as_str(), event, 0.0).unwrap();
         }
 
-        let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
+        let eventcount_to_new = ds_to
+            .get_event_count(bucket_to.id.as_str(), None, None)
+            .unwrap();
         info!(
             "Synced {} new events",
             eventcount_to_new - eventcount_to_old
@@ -280,7 +302,7 @@ fn log_buckets(ds: &dyn AccessMethod) {
         info!(" - {}", bucket.id.as_str());
         info!(
             "   eventcount: {:?}",
-            ds.get_event_count(bucket.id.as_str()).unwrap()
+            ds.get_event_count(bucket.id.as_str(), None, None).unwrap()
         );
     }
 }
