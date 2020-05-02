@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use aw_client_rust::AwClient;
+use aw_client_rust::{AwClient, ClientError};
 use chrono::{DateTime, Duration, Utc};
 
 use aw_datastore::{Datastore, DatastoreError};
@@ -86,7 +86,11 @@ impl AccessMethod for AwClient {
         Ok(self.get_buckets().unwrap())
     }
     fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
-        Ok(self.get_bucket(bucket_id).unwrap())
+        match self.get_bucket(bucket_id) {
+            Ok(b) => Ok(b),
+            Err(ClientError::NoSuchBucket(_)) => Err(DatastoreError::NoSuchBucket),
+            Err(e) => panic!(format!("{:?}", e)),
+        }
     }
     fn get_events(
         &self,
@@ -122,32 +126,39 @@ impl AccessMethod for AwClient {
     }
 }
 
-/// Performs a single sync pass
+/// Performs a single sync pass, in one direction
+///
+/// Steps:
+///   - Check the remotes
+///   - Create any new buckets (avoiding bucket ID conflicts by appending '-synced-from-{deviceid}')
+///   - Importing any new events
+#[allow(dead_code)]
 pub fn sync_run() {
-    // TODO: Rewrite to use AccessMethod throughout
-
     // TODO: Get path using dirs module
     let sync_directory = Path::new("/tmp/aw-sync-rust/testing");
     fs::create_dir_all(sync_directory).unwrap();
 
     // TODO: Use the local datastore here, preferably passed from main
     info!("Setting up local datastore...");
-    let ds_local = Datastore::new(
-        sync_directory
-            .join("test-local.db")
-            .into_os_string()
-            .into_string()
-            .unwrap(),
-        false,
-    );
-    //log_buckets(&ds_local)?;
+
+    // We can either use a temporary datastore
+    //let ds_local = setup_datastore(
+    //    sync_directory
+    //        .join("test-local.db")
+    //        .into_os_string()
+    //        .into_string()
+    //        .unwrap(),
+    //);
+
+    // ...or use a running server
+    let ds_local = setup_client("localhost", "5666", "test");
 
     info!("Setting up remote datastores...");
     let ds_remotes = setup_test(sync_directory).unwrap();
 
     // FIXME: These are not the datastores that should actually be synced, I'm just testing
     for ds_from in &ds_remotes {
-        sync_datastores(ds_from, &ds_local);
+        sync_datastores(&**ds_from, &*ds_local);
     }
 
     log_buckets(&ds_local);
@@ -156,28 +167,34 @@ pub fn sync_run() {
     }
 }
 
-fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
-    let mut datastores: Vec<Datastore> = Vec::new();
+fn setup_datastore(path: String) -> Box<dyn AccessMethod> {
+    Box::new(Datastore::new(path, false))
+}
+
+fn setup_client(host: &str, port: &str, name: &str) -> Box<dyn AccessMethod> {
+    Box::new(AwClient::new(host, port, name))
+}
+
+fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Box<dyn AccessMethod>>> {
+    let mut datastores = Vec::new();
     for n in 0..2 {
-        let ds_ = Datastore::new(
+        let ds = setup_datastore(
             sync_directory
                 .join(format!("test-remote-{}.db", n))
                 .into_os_string()
                 .into_string()
                 .unwrap(),
-            false,
         );
-        let ds = &ds_ as &dyn AccessMethod;
 
         // Create a bucket
         let bucket_jsonstr = format!(
             r#"{{
-                "id": "bucket-{}",
+                "id": "bucket-0",
                 "type": "test",
-                "hostname": "device-{}",
+                "hostname": "testdevice-{}",
                 "client": "test"
             }}"#,
-            n, n
+            n
         );
         let bucket: Bucket = serde_json::from_str(&bucket_jsonstr)?;
         match ds.create_bucket(&bucket) {
@@ -191,9 +208,13 @@ fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
         };
 
         // Insert some testing events into the bucket
-        let events: Vec<Event> = (0..3)
+        // NOTE: For large n the timestamp might be later than sync run end time. This can yield
+        // weird results if calls are repeated quickly.
+        let n = 100;
+        let start = Utc::now();
+        let events: Vec<Event> = (0..n)
             .map(|i| {
-                let timestamp: DateTime<Utc> = Utc::now() + Duration::milliseconds(i * 10);
+                let timestamp = start + Duration::milliseconds(i);
                 let event_jsonstr = format!(
                     r#"{{
                         "timestamp": "{}",
@@ -210,27 +231,36 @@ fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
         ds.insert_events(bucket.id.as_str(), events).unwrap();
         //let new_eventcount = ds.get_event_count(bucket.id.as_str(), None, None).unwrap();
         //info!("Eventcount: {:?} ({} new)", new_eventcount, events.len());
-        datastores.push(ds_);
+        datastores.push(ds);
     }
     Ok(datastores)
 }
 
 /// Returns the sync-destination bucket for a given bucket, creates it if it doesn't exist.
 fn get_or_create_sync_bucket(bucket_from: &Bucket, ds_to: &dyn AccessMethod) -> Bucket {
-    // Ensure the bucket ID ends in "-synced"
-    // TODO: Include device ID in synced bucket ID (to make unique)
-    let new_id = format!("{}-synced", bucket_from.id.replace("-synced", ""));
+    // Append "-synced-from-{device_id}" to the destination bucket ID (to make unique)
+    let new_id = format!(
+        "{}-synced-from-{}",
+        bucket_from.id.replace("-synced", ""),
+        bucket_from.hostname
+    );
 
     match ds_to.get_bucket(new_id.as_str()) {
         Ok(bucket) => bucket,
         Err(DatastoreError::NoSuchBucket) => {
             let mut bucket_new = bucket_from.clone();
             bucket_new.id = new_id.clone();
-            // TODO: Replace sync origin with hostname/GUID and discuss how we will treat the data
-            // attributes for internal use.
+
+            // TODO: Replace sync origin with device ID
+            // TODO: discuss how we will treat the data attributes for internal use
+            bucket_new.data.insert(
+                "sync.origin".to_string(),
+                serde_json::json!(bucket_from.hostname),
+            );
             bucket_new
                 .data
-                .insert("$aw.sync.origin".to_string(), serde_json::json!("test"));
+                .insert("sync.id".to_string(), serde_json::json!(bucket_from.id));
+
             ds_to.create_bucket(&bucket_new).unwrap();
             ds_to.get_bucket(new_id.as_str()).unwrap()
         }
@@ -294,7 +324,7 @@ pub fn sync_datastores(ds_from: &dyn AccessMethod, ds_to: &dyn AccessMethod) {
     }
 }
 
-fn log_buckets(ds: &dyn AccessMethod) {
+fn log_buckets(ds: &Box<dyn AccessMethod>) {
     // Logs all buckets and some metadata for a given datastore
     let buckets = ds.get_buckets().unwrap();
     info!("Buckets in {:?}:", ds);

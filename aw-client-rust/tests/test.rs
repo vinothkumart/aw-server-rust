@@ -8,7 +8,7 @@ extern crate serde_json;
 mod test {
     use aw_client_rust::AwClient;
     use aw_client_rust::Event;
-    use chrono::{DateTime, Duration, Utc};
+    use chrono::{Duration, Utc};
     use serde_json::Map;
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -18,16 +18,16 @@ mod test {
     // FIXME: Bind to a port that is free for certain and use that for the client instead
     static PORT: u16 = 41293;
 
-    fn wait_for_server(timeout_s: u32, client: &AwClient) -> () {
-        for i in 0.. {
+    fn wait_for_server(timeout: i64, client: &AwClient) -> () {
+        // Wait for server to come online
+        let start = Utc::now();
+        loop {
             match client.get_info() {
                 Ok(_) => break,
                 Err(err) => {
-                    if i == timeout_s - 1 {
-                        panic!(
-                            "Timed out starting aw-server after {}s: {:?}",
-                            timeout_s, err
-                        );
+                    let passed = Utc::now() - start;
+                    if passed >= chrono::Duration::seconds(timeout) {
+                        panic!("Timed out starting aw-server after {}s: {:?}", timeout, err);
                     }
                 }
             }
@@ -38,7 +38,7 @@ mod test {
     }
 
     fn setup_testserver() -> () {
-        // Start testserver and wait 10s for it to start up
+        // Start testserver
         // TODO: Properly shutdown
         use aw_server::endpoints::ServerState;
         let state = ServerState {
@@ -56,8 +56,17 @@ mod test {
 
     #[test]
     fn test_full() {
+        // Set to true to use a temporary test server
+        // Set to false to use your local testing instance (port 5666)
+        let temp_server = true;
+
         let ip = "127.0.0.1";
-        let port: String = PORT.to_string();
+        let port: String = if temp_server {
+            PORT.to_string()
+        } else {
+            "5666".to_string()
+        };
+
         let clientname = "aw-client-rust-test";
         let client: AwClient = AwClient::new(ip, &port, clientname);
 

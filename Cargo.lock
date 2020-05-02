@@ -164,6 +164,7 @@ dependencies = [
  "aw-server",
  "chrono",
  "log 0.4.8",
+ "regex",
  "serde",
  "serde_json",
 ]

@@ -27,9 +27,22 @@ pub struct AwClient {
     pub hostname: String,
 }
 
+#[derive(Debug)]
+pub enum ClientError {
+    NoSuchBucket(String),
+    StatusError(reqwest::StatusCode),
+    UnknownError(reqwest::Error),
+}
+
+impl std::convert::From<reqwest::Error> for ClientError {
+    fn from(err: reqwest::Error) -> Self {
+        Self::UnknownError(err)
+    }
+}
+
 impl AwClient {
-    pub fn new(ip: &str, port: &str, name: &str) -> AwClient {
-        let baseurl = format!("http://{}:{}", ip, port);
+    pub fn new(host: &str, port: &str, name: &str) -> AwClient {
+        let baseurl = format!("http://{}:{}", host, port);
         let client = reqwest::blocking::Client::new();
         let hostname = gethostname::gethostname().into_string().unwrap();
         AwClient {
@@ -40,15 +53,27 @@ impl AwClient {
         }
     }
 
-    pub fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {
+    pub fn get_bucket(&self, bucketname: &str) -> Result<Bucket, ClientError> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
-        let bucket: Bucket = self.client.get(&url).send()?.json()?;
-        Ok(bucket)
+        let res = self.client.get(&url).send()?;
+        match res.error_for_status() {
+            Ok(_res) => {
+                let bucket: Bucket = _res.json()?;
+                Ok(bucket)
+            }
+            Err(e) => match e.status().unwrap() {
+                reqwest::StatusCode::NOT_FOUND => {
+                    Err(ClientError::NoSuchBucket(bucketname.to_string()))
+                }
+                e => Err(ClientError::StatusError(e)),
+            },
+        }
     }
 
     pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, reqwest::Error> {
         let url = format!("{}/api/0/buckets/", self.baseurl);
-        Ok(self.client.get(&url).send()?.json()?)
+        let res = self.client.get(&url).send()?.error_for_status()?;
+        Ok(res.json()?)
     }
 
     pub fn create_bucket(&self, bucketname: &str, buckettype: &str) -> Result<(), reqwest::Error> {
@@ -153,11 +178,7 @@ impl AwClient {
             req = req.query(&[("end", end.to_rfc3339())]);
         }
 
-        let res = req.send()?.text()?;
-        let count: i64 = match res.parse() {
-            Ok(count) => count,
-            Err(err) => panic!("could not parse get_event_count response: {:?}", err),
-        };
+        let count: i64 = req.send()?.json()?;
         Ok(count)
     }
 

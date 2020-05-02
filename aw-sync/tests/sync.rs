@@ -1,10 +1,12 @@
 #[macro_use]
 extern crate log;
 extern crate aw_sync;
+extern crate regex;
 
 #[cfg(test)]
 mod sync_tests {
     use chrono::{DateTime, Utc};
+    use regex::Regex;
     use std::collections::HashMap;
 
     use aw_datastore::{Datastore, DatastoreError};
@@ -108,10 +110,15 @@ mod sync_tests {
         assert!(buckets_src.len() == buckets_dest.len());
     }
 
+    fn synced_bucketid_to_orig(bucket_id: &str) -> String {
+        let re = Regex::new("-synced-from-.*").unwrap();
+        re.replace(bucket_id, "").to_string()
+    }
+
     fn check_synced_buckets_equal_to_src(all_buckets_map: &HashMap<String, (&Datastore, Bucket)>) {
         for (ds, bucket) in all_buckets_map.values() {
             if bucket.id.contains("-synced") {
-                let bucket_src_id = bucket.id.replace("-synced", "");
+                let bucket_src_id = synced_bucketid_to_orig(&bucket.id);
                 let (ds_src, bucket_src) = all_buckets_map.get(&bucket_src_id).unwrap();
                 let events_synced = ds.get_events(bucket.id.as_str(), None, None, None).unwrap();
                 let events_src = ds_src
