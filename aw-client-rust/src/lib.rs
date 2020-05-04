@@ -17,6 +17,7 @@ pub use aw_models::{Bucket, BucketMetadata, Event};
 pub struct Info {
     pub hostname: String,
     pub testing: bool,
+    pub device_id: String,
 }
 
 #[derive(Debug)]
@@ -90,13 +91,17 @@ impl AwClient {
             created: None,
             last_updated: None,
         };
-        self.client.post(&url).json(&data).send()?;
+        self.client
+            .post(&url)
+            .json(&data)
+            .send()?
+            .error_for_status()?;
         Ok(())
     }
 
     pub fn delete_bucket(&self, bucketname: &str) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
-        self.client.delete(&url).send()?;
+        self.client.delete(&url).send()?.error_for_status()?;
         Ok(())
     }
 
@@ -120,7 +125,8 @@ impl AwClient {
             req = req.query(&[("limit", limit)]);
         }
 
-        Ok(req.send()?.json()?)
+        let res = req.send()?.error_for_status()?;
+        Ok(res.json()?)
     }
 
     pub fn insert_event(&self, bucketname: &str, event: &Event) -> Result<(), reqwest::Error> {
@@ -135,7 +141,11 @@ impl AwClient {
         events: Vec<Event>,
     ) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
-        self.client.post(&url).json(&events).send()?;
+        self.client
+            .post(&url)
+            .json(&events)
+            .send()?
+            .error_for_status()?;
         Ok(())
     }
 
@@ -149,7 +159,11 @@ impl AwClient {
             "{}/api/0/buckets/{}/heartbeat?pulsetime={}",
             self.baseurl, bucketname, pulsetime
         );
-        self.client.post(&url).json(&event).send()?;
+        self.client
+            .post(&url)
+            .json(&event)
+            .send()?
+            .error_for_status()?;
         Ok(())
     }
 
@@ -158,7 +172,7 @@ impl AwClient {
             "{}/api/0/buckets/{}/events/{}",
             self.baseurl, bucketname, event_id
         );
-        self.client.delete(&url).send()?;
+        self.client.delete(&url).send()?.error_for_status()?;
         Ok(())
     }
 
@@ -178,12 +192,14 @@ impl AwClient {
             req = req.query(&[("end", end.to_rfc3339())]);
         }
 
-        let count: i64 = req.send()?.json()?;
+        let res = req.send()?.error_for_status()?;
+        let count: i64 = res.json()?;
         Ok(count)
     }
 
     pub fn get_info(&self) -> Result<Info, reqwest::Error> {
         let url = format!("{}/api/0/info", self.baseurl);
-        Ok(self.client.get(&url).send()?.json()?)
+        let res = self.client.get(&url).send()?.error_for_status()?;
+        Ok(res.json()?)
     }
 }
