@@ -8,6 +8,7 @@
 extern crate chrono;
 extern crate serde_json;
 
+use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -20,6 +21,7 @@ use aw_models::{Bucket, Event};
 
 // This trait should be implemented by both AwClient and Datastore, unifying them under a single API
 pub trait AccessMethod: std::fmt::Debug {
+    fn get_uuid(&self) -> Result<String, String>;
     fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String>;
     fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError>;
     fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError>;
@@ -41,6 +43,11 @@ pub trait AccessMethod: std::fmt::Debug {
 }
 
 impl AccessMethod for Datastore {
+    fn get_uuid(&self) -> Result<String, String> {
+        // TODO: Implement somehow... (if needed?)
+        // Err("Not implemented".to_string())
+        Ok("0".to_string())
+    }
     fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
         Ok(self.get_buckets().unwrap())
     }
@@ -82,6 +89,9 @@ impl AccessMethod for Datastore {
 }
 
 impl AccessMethod for AwClient {
+    fn get_uuid(&self) -> Result<String, String> {
+        Ok(self.get_info().unwrap().device_id)
+    }
     fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
         Ok(self.get_buckets().unwrap())
     }
@@ -135,39 +145,122 @@ impl AccessMethod for AwClient {
 #[allow(dead_code)]
 pub fn sync_run() {
     // TODO: Get path using dirs module
-    let sync_directory = Path::new("/tmp/aw-sync-rust/testing");
+    let sync_directory = Path::new("/tmp/aw-sync-rust/testing/sync");
     fs::create_dir_all(sync_directory).unwrap();
 
     // TODO: Use the local datastore here, preferably passed from main
     info!("Setting up local datastore...");
 
     // We can either use a temporary datastore
+    let local_ds_dir = Path::new("/tmp/aw-sync-rust/testing/datastores");
+    fs::create_dir_all(local_ds_dir).unwrap();
     //let ds_local = setup_datastore(
-    //    sync_directory
-    //        .join("test-local.db")
+    //    local_ds_dir
+    //        .join("local.db")
     //        .into_os_string()
     //        .into_string()
     //        .unwrap(),
     //);
 
+    // To test things out, do a run with the first datastore and then with the second.
+    // NOTE: You also need to change the UUID returned for Datastore's as get_uuid is not yet
+    // implemented for it.
+    let ds_local = setup_datastore_test(local_ds_dir, "test1").unwrap();
+    //let ds_local = setup_datastore_test(local_ds_dir, "test2").unwrap();
+
     // ...or use a running server
-    let ds_local = setup_client("localhost", "5666", "test");
+    // let ds_local = setup_client("localhost", "5666", "test");
 
-    info!("Setting up remote datastores...");
-    let ds_remotes = setup_test(sync_directory).unwrap();
+    // Push local buckets into remote
+    info!("Pushing events");
+    let ds_dest = setup_sync_dest(sync_directory, &*ds_local);
+    sync_datastores(&*ds_local, &*ds_dest);
 
-    // FIXME: These are not the datastores that should actually be synced, I'm just testing
-    for ds_from in &ds_remotes {
-        sync_datastores(&**ds_from, &*ds_local);
+    // Pull remote buckets into local store
+    info!("Pulling events");
+    let ds_remotes = get_sync_dests(sync_directory, &*ds_local).unwrap();
+    for ds_remote in &ds_remotes {
+        sync_datastores(&**ds_remote, &*ds_local);
     }
+    info!("Pulled from {} remotes", ds_remotes.len());
 
+    info!("Local bucket:");
     log_buckets(&*ds_local);
-    for ds_from in &ds_remotes {
-        log_buckets(&**ds_from);
+
+    info!("Remote buckets:");
+    for remote in &ds_remotes {
+        log_buckets(&**remote);
     }
+    // TODO: Not possible (database is locked)
+    //for remote in get_sync_remotes(sync_directory).unwrap() {
+    //    log_buckets(&*remote);
+    //}
 }
 
+fn setup_sync_dest(sync_directory: &Path, source: &dyn AccessMethod) -> Box<dyn AccessMethod> {
+    info!("Setting up remote...");
+    setup_datastore(
+        sync_directory
+            .join(format!("remote-{}.db", source.get_uuid().unwrap()))
+            .into_os_string()
+            .into_string()
+            .unwrap(),
+    )
+}
+
+fn get_sync_remotes_paths(sync_directory: &Path) -> std::io::Result<Vec<String>> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(sync_directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            paths.push(path.into_os_string().into_string().unwrap());
+        }
+    }
+    Ok(paths)
+}
+
+fn get_sync_remotes(sync_dir: &Path) -> std::io::Result<Vec<Box<dyn AccessMethod>>> {
+    let paths = get_sync_remotes_paths(sync_dir)?;
+    let mut remotes = Vec::new();
+    for path in paths {
+        remotes.push(setup_datastore_readonly(path));
+    }
+    Ok(remotes)
+}
+
+fn get_sync_dests(
+    sync_dir: &Path,
+    source: &dyn AccessMethod,
+) -> std::io::Result<Vec<Box<dyn AccessMethod>>> {
+    let paths = get_sync_remotes_paths(sync_dir)?;
+    let mut dests = Vec::new();
+    for path in paths {
+        let filename = Path::new(&path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        // Skip remote for current device
+        if !filename.contains(source.get_uuid().unwrap().as_str()) {
+            debug!("Found remote {}", filename);
+            dests.push(setup_datastore_readonly(path));
+        } else {
+            debug!("Skipped remote {}", filename);
+        }
+    }
+    Ok(dests)
+}
+
+/// Only to be used with datastores managed by the current device
 fn setup_datastore(path: String) -> Box<dyn AccessMethod> {
+    Box::new(Datastore::new(path, false))
+}
+
+/// Only to be used with datastores managed by remote devices
+fn setup_datastore_readonly(path: String) -> Box<dyn AccessMethod> {
+    // TODO: Open as readonly
     Box::new(Datastore::new(path, false))
 }
 
@@ -175,73 +268,80 @@ fn setup_client(host: &str, port: &str, name: &str) -> Box<dyn AccessMethod> {
     Box::new(AwClient::new(host, port, name))
 }
 
-fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Box<dyn AccessMethod>>> {
+fn setup_test(ds_dir: &Path) -> std::io::Result<Vec<Box<dyn AccessMethod>>> {
     let mut datastores = Vec::new();
     for n in 0..2 {
-        let ds = setup_datastore(
-            sync_directory
-                .join(format!("test-remote-{}.db", n))
-                .into_os_string()
-                .into_string()
-                .unwrap(),
-        );
-
-        // Create a bucket
-        let bucket_jsonstr = format!(
-            r#"{{
-                "id": "bucket-0",
-                "type": "test",
-                "hostname": "testdevice-{}",
-                "client": "test"
-            }}"#,
-            n
-        );
-        let bucket: Bucket = serde_json::from_str(&bucket_jsonstr)?;
-        match ds.create_bucket(&bucket) {
-            Ok(()) => (),
-            Err(e) => match e {
-                DatastoreError::BucketAlreadyExists => {
-                    debug!("bucket already exists, skipping");
-                }
-                e => panic!("woops! {:?}", e),
-            },
-        };
-
-        // Insert some testing events into the bucket
-        // NOTE: For large n the timestamp might be later than sync run end time. This can yield
-        // weird results if calls are repeated quickly.
-        let n = 100;
-        let start = Utc::now();
-        let events: Vec<Event> = (0..n)
-            .map(|i| {
-                let timestamp = start + Duration::milliseconds(i);
-                let event_jsonstr = format!(
-                    r#"{{
-                        "timestamp": "{}",
-                        "duration": 0,
-                        "data": {{"test": {} }}
-                    }}"#,
-                    timestamp.to_rfc3339(),
-                    i
-                );
-                serde_json::from_str(&event_jsonstr).unwrap()
-            })
-            .collect::<Vec<Event>>();
-
-        ds.insert_events(bucket.id.as_str(), events).unwrap();
         //let new_eventcount = ds.get_event_count(bucket.id.as_str(), None, None).unwrap();
         //info!("Eventcount: {:?} ({} new)", new_eventcount, events.len());
+        let ds = setup_datastore_test(ds_dir, &format!("{}", n))?;
         datastores.push(ds);
     }
     Ok(datastores)
 }
 
+fn setup_datastore_test(ds_dir: &Path, uuid: &str) -> std::io::Result<Box<dyn AccessMethod>> {
+    let ds = setup_datastore(
+        ds_dir
+            .join(format!("test-remote-{}.db", uuid))
+            .into_os_string()
+            .into_string()
+            .unwrap(),
+    );
+
+    // Create a bucket
+    let bucket_jsonstr = format!(
+        r#"{{
+            "id": "bucket-test",
+            "type": "test",
+            "hostname": "{}",
+            "client": "test"
+        }}"#,
+        uuid
+    );
+    let bucket: Bucket = serde_json::from_str(&bucket_jsonstr)?;
+    match ds.create_bucket(&bucket) {
+        Ok(()) => (),
+        Err(e) => match e {
+            DatastoreError::BucketAlreadyExists => {
+                debug!("bucket already exists, skipping");
+            }
+            e => panic!("woops! {:?}", e),
+        },
+    };
+
+    // Insert some testing events into the bucket
+    // NOTE: For large n the timestamp might be later than sync run end time. This can yield
+    // weird results if calls are repeated quickly.
+    let n = 100;
+    let start = Utc::now();
+    let events: Vec<Event> = (0..n)
+        .map(|i| {
+            let timestamp = start + Duration::milliseconds(i);
+            let event_jsonstr = format!(
+                r#"{{
+                        "timestamp": "{}",
+                        "duration": 0,
+                        "data": {{"test": {} }}
+                    }}"#,
+                timestamp.to_rfc3339(),
+                i
+            );
+            serde_json::from_str(&event_jsonstr).unwrap()
+        })
+        .collect::<Vec<Event>>();
+
+    ds.insert_events(bucket.id.as_str(), events).unwrap();
+    info!("Inserted {} events", n);
+    Ok(ds)
+}
+
 /// Returns the sync-destination bucket for a given bucket, creates it if it doesn't exist.
 fn get_or_create_sync_bucket(bucket_from: &Bucket, ds_to: &dyn AccessMethod) -> Bucket {
     // Append "-synced-from-{device_id}" to the destination bucket ID (to make unique)
+    let re = Regex::new(r"-synced-.*").unwrap();
     let new_id = format!(
         "{}-synced-from-{}",
-        bucket_from.id.replace("-synced", ""),
+        re.replace(bucket_from.id.as_str(), ""),
         bucket_from.hostname
     );
 
