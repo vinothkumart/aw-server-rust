@@ -1,6 +1,8 @@
 use rocket::config::{Config, Environment, Limits};
+use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
+use uuid::Uuid;
 
 use crate::dirs;
 
@@ -115,4 +117,22 @@ pub fn create_config(testing: bool) -> AWConfig {
     let aw_config: AWConfig = toml::from_str(&content).expect("Failed to parse config file");
 
     aw_config
+}
+
+/// Retrieves the device ID, if none exists it generates one (using UUID v4)
+pub fn get_device_id() -> String {
+    // TODO: Use seperate device_id for testing mode
+    // TODO: Cache to avoid retrieving on every /info call
+    // TODO: How should these unwraps be removed?
+    //       Should this be propagated into a 500 Internal Server Error? How?
+    // I chose get_data_dir over get_config_dir since the latter isn't yet supported on Android.
+    let mut path = dirs::get_data_dir().unwrap();
+    path.push("device_id");
+    if path.exists() {
+        fs::read_to_string(path).unwrap()
+    } else {
+        let uuid = Uuid::new_v4().to_hyphenated().to_string();
+        fs::write(path, &uuid).unwrap();
+        uuid
+    }
 }

@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -6,10 +5,9 @@ use gethostname::gethostname;
 use rocket::response::NamedFile;
 use rocket::State;
 use rocket_contrib::json::JsonValue;
-use uuid::Uuid;
 
+use crate::config::get_device_id;
 use crate::config::AWConfig;
-use crate::dirs;
 
 #[macro_export]
 macro_rules! endpoints_get_lock {
@@ -66,23 +64,6 @@ fn root_static(file: PathBuf, state: State<ServerState>) -> Option<NamedFile> {
 #[get("/favicon.ico")]
 fn root_favicon(state: State<ServerState>) -> Option<NamedFile> {
     NamedFile::open(state.asset_path.join("favicon.ico")).ok()
-}
-
-/// Retrieves the device ID, if none exists it generates one (using UUID v4)
-fn get_device_id() -> String {
-    // TODO: Cache to avoid retrieving on every /info call
-    // TODO: How should these unwraps be removed?
-    //       Should this be propagated into a 500 Internal Server Error? How?
-    // I chose get_data_dir over get_config_dir since the latter isn't yet supported on Android.
-    let mut path = dirs::get_data_dir().unwrap();
-    path.push("device_id");
-    if path.exists() {
-        fs::read_to_string(path).unwrap()
-    } else {
-        let uuid = Uuid::new_v4().to_hyphenated().to_string();
-        fs::write(path, &uuid).unwrap();
-        uuid
-    }
 }
 
 #[get("/")]
